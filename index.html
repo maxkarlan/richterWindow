@@ -562,6 +562,26 @@
       return Math.min(hi, Math.max(lo, v));
     }
 
+    function setDefaultFrameAspect(targetAspect) {
+      const viewW = canvas.clientWidth || window.innerWidth || 1;
+      const viewH = canvas.clientHeight || window.innerHeight || 1;
+      const shortSide = Math.min(viewW, viewH);
+      const bufferPx = shortSide / 20;
+      const maxW = Math.max(0, 1.0 - 2.0 * (bufferPx / viewW));
+      const maxH = Math.max(0, 1.0 - 2.0 * (bufferPx / viewH));
+      const normalizedAspect = targetAspect * (viewH / viewW);
+      let w = maxW;
+      let h = w / normalizedAspect;
+      if (h > maxH) {
+        h = maxH;
+        w = h * normalizedAspect;
+      }
+      frameState.w = clamp(w, 0.0, maxW);
+      frameState.h = clamp(h, 0.0, maxH);
+      frameState.x = (1.0 - frameState.w) * 0.5;
+      frameState.y = (1.0 - frameState.h) * 0.5;
+    }
+
     function updateGridLabel() {
       gridLabel.textContent = `${gridState.cols} x ${gridState.rows}`;
     }
@@ -807,6 +827,7 @@
       requestAnimationFrame(render);
     }
 
+    setDefaultFrameAspect(2.0);
     requestAnimationFrame(render);
   </script>
 </body>
