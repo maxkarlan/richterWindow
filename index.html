@@ -18,13 +18,58 @@
       height: 100%;
       display: block;
     }
+    #grid-controls {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.45);
+      color: #fff;
+      font-size: 12px;
+      user-select: none;
+    }
+    #grid-controls button {
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      border-radius: 6px;
+      font-size: 12px;
+      padding: 4px 7px;
+      cursor: pointer;
+    }
+    #grid-controls button:hover {
+      background: rgba(255, 255, 255, 0.18);
+    }
+    #grid-controls .label {
+      margin: 0 4px;
+      min-width: 42px;
+      text-align: center;
+      opacity: 0.95;
+    }
   </style>
 </head>
 <body>
+  <div id="grid-controls">
+    <button id="col-dec" type="button">- Col</button>
+    <button id="col-inc" type="button">+ Col</button>
+    <span id="grid-label" class="label">4 x 3</span>
+    <button id="row-dec" type="button">- Row</button>
+    <button id="row-inc" type="button">+ Row</button>
+  </div>
   <canvas id="gl"></canvas>
 
   <script>
     const canvas = document.getElementById("gl");
+    const gridLabel = document.getElementById("grid-label");
+    const colIncBtn = document.getElementById("col-inc");
+    const colDecBtn = document.getElementById("col-dec");
+    const rowIncBtn = document.getElementById("row-inc");
+    const rowDecBtn = document.getElementById("row-dec");
     const gl = canvas.getContext("webgl");
     if (!gl) {
       document.body.innerHTML = "<p style='color:white;padding:16px'>WebGL not supported in this browser.</p>";
@@ -44,6 +89,7 @@
       uniform vec2 u_resolution;
       uniform float u_time;
       uniform vec4 u_frameRect; // xMin, yMin, xMax, yMax in normalized canvas space
+      uniform vec2 u_gridCount; // x = columns, y = rows
 
       #define SAMPLES 20
       #define GOLDEN_ANGLE 2.39996323
@@ -298,7 +344,7 @@
           gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
           return;
         }
-        vec2 gridCount = vec2(4.0, 3.0);
+        vec2 gridCount = u_gridCount;
         float frameBase = 0.09;
         vec2 uvFrame = (rawUv01 - frameMin) / frameSize;
         vec2 uv01 = uvFrame;
@@ -482,6 +528,16 @@
     const uResolution = gl.getUniformLocation(program, "u_resolution");
     const uTime = gl.getUniformLocation(program, "u_time");
     const uFrameRect = gl.getUniformLocation(program, "u_frameRect");
+    const uGridCount = gl.getUniformLocation(program, "u_gridCount");
+
+    const MIN_COLS = 1;
+    const MAX_COLS = 10;
+    const MIN_ROWS = 1;
+    const MAX_ROWS = 10;
+    const gridState = {
+      cols: 4,
+      rows: 3
+    };
 
     const frameState = {
       x: 0.06,
@@ -505,6 +561,22 @@
     function clamp(v, lo, hi) {
       return Math.min(hi, Math.max(lo, v));
     }
+
+    function updateGridLabel() {
+      gridLabel.textContent = `${gridState.cols} x ${gridState.rows}`;
+    }
+
+    function setGrid(cols, rows) {
+      gridState.cols = clamp(cols, MIN_COLS, MAX_COLS);
+      gridState.rows = clamp(rows, MIN_ROWS, MAX_ROWS);
+      updateGridLabel();
+    }
+
+    colIncBtn.addEventListener("click", () => setGrid(gridState.cols + 1, gridState.rows));
+    colDecBtn.addEventListener("click", () => setGrid(gridState.cols - 1, gridState.rows));
+    rowIncBtn.addEventListener("click", () => setGrid(gridState.cols, gridState.rows + 1));
+    rowDecBtn.addEventListener("click", () => setGrid(gridState.cols, gridState.rows - 1));
+    updateGridLabel();
 
     function eventToUv(evt) {
       const rect = canvas.getBoundingClientRect();
@@ -723,6 +795,7 @@
       gl.useProgram(program);
       gl.uniform2f(uResolution, gl.drawingBufferWidth, gl.drawingBufferHeight);
       gl.uniform1f(uTime, timeMs * 0.001);
+      gl.uniform2f(uGridCount, gridState.cols, gridState.rows);
       gl.uniform4f(
         uFrameRect,
         frameState.x,
