@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Window Painting Study</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+
+  <script>
+    const canvas = document.getElementById("gl");
+    const gl = canvas.getContext("webgl");
+    if (!gl) {
+      document.body.innerHTML = "<p style='color:white;padding:16px'>WebGL not supported in this browser.</p>";
+      throw new Error("WebGL not supported");
+    }
+
+    const vertexSource = `
+      attribute vec2 a_position;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+      }
+    `;
+
+    const fragmentSource = `
+      precision highp float;
+
+      uniform vec2 u_resolution;
+      uniform float u_time;
+      uniform vec4 u_frameRect; // xMin, yMin, xMax, yMax in normalized canvas space
+
+      #define SAMPLES 20
+      #define GOLDEN_ANGLE 2.39996323
+
+      struct SceneData {
+        vec3 color;
+        float depth; // 0 = near viewer, 1 = far into screen
+      };
+
+      float hash21(vec2 p) {
+        p = fract(p * vec2(123.34, 345.45));
+        p += dot(p, p + 34.345);
+        return fract(p.x * p.y);
+      }
+
+      float softBand(float d, float halfWidth, float blur) {
+        return 1.0 - smoothstep(halfWidth, halfWidth + blur, abs(d));
+      }
+
+      float filmGrain(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      float valueNoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+
+        float a = hash21(i);
+        float b = hash21(i + vec2(1.0, 0.0));
+        float c = hash21(i + vec2(0.0, 1.0));
+        float d = hash21(i + vec2(1.0, 1.0));
+
+        return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+      }
+
+      float blotchField(vec2 p) {
+        float n = 0.0;
+        n += valueNoise(p * 0.70) * 0.58;
+        n += valueNoise(p * 1.35 + vec2(11.7, 5.9)) * 0.30;
+        n += valueNoise(p * 2.60 + vec2(3.4, 17.1)) * 0.12;
+        return n;
+      }
+
+      float canvasWeave(vec2 p) {
+        vec2 uv = p * vec2(0.34, 0.37);
+        float wobble = valueNoise(uv * 0.65 + vec2(9.1, 3.4)) * 2.0 - 1.0;
+        float warpX = sin((p.x + wobble * 3.0) * 1.55);
+        float warpY = sin((p.y - wobble * 2.4) * 1.43);
+        float weave = 0.5 + 0.25 * warpX + 0.25 * warpY;
+        return clamp(weave, 0.0, 1.0);
+      }
+
+      SceneData paneSceneAt(vec2 paneUv, float paneSeed) {
+        // Muted painterly field (shadow grid is composited separately).
+        vec2 uv = paneUv - 0.5;
+        uv.x *= u_resolution.x / u_resolution.y;
+        float rot = (paneSeed - 0.5) * 0.02;
+        mat2 rMat = mat2(cos(rot), -sin(rot), sin(rot), cos(rot));
+        uv = rMat * uv;
+
+        float topDark = smoothstep(0.60, -0.30, uv.y) * 0.22;
+        float leftDark = smoothstep(0.55, -0.30, -uv.x) * 0.12;
+        float cornerDark = exp(-5.0 * dot(uv - vec2(-0.34, 0.34), uv - vec2(-0.34, 0.34))) * 0.20;
+        float pigment = blotchField(uv * vec2(2.2, 1.7) + vec2(paneSeed * 8.0, paneSeed * 13.0));
+        float microPigment = valueNoise(uv * vec2(6.0, 5.0) + vec2(paneSeed * 31.0, paneSeed * 19.0));
+        float baseTone = clamp(topDark + leftDark + cornerDark, 0.0, 1.0);
+        float lightPass = 1.0 - smoothstep(0.35, 0.85, baseTone);
+        float tone = clamp(baseTone + (pigment - 0.5) * (0.12 + 0.026 * lightPass) + (microPigment - 0.5) * 0.04, 0.0, 1.0);
+
+        float depth = clamp(0.32 + tone * 0.38 + (0.5 - paneUv.y) * 0.12, 0.0, 1.0);
+
+        vec3 lightTone = mix(vec3(0.736, 0.734, 0.729), vec3(0.700, 0.704, 0.699), hash21(vec2(paneSeed, 8.8)));
+        vec3 darkTone = mix(vec3(0.575, 0.598, 0.598), vec3(0.540, 0.568, 0.568), hash21(vec2(paneSeed, 9.6)));
+        float toneFlat = tone * 0.93 + 0.03;
+        vec3 col = mix(lightTone, darkTone, toneFlat);
+        vec3 paneDrift = vec3(
+          mix(-0.010, 0.010, hash21(vec2(paneSeed, 12.1))),
+          mix(-0.006, 0.006, hash21(vec2(paneSeed, 15.4))),
+          mix(-0.012, 0.008, hash21(vec2(paneSeed, 18.8)))
+        );
+        col += paneDrift * 0.60;
+
+        // Slight depth haze for painterly atmosphere.
+        vec3 haze = vec3(0.79, 0.785, 0.77);
+        col = mix(col, haze, depth * 0.16);
+
+        SceneData s;
+        s.color = col;
+        s.depth = depth;
+        return s;
+      }
+
+      vec3 paneDofColor(vec2 paneUv, vec2 paneId, float paneSeed) {
+        SceneData center = paneSceneAt(paneUv, paneSeed);
+
+        float focalDepth = mix(0.22, 0.48, hash21(paneId + 2.31));
+        float aperture = mix(7.0, 12.0, fract(paneSeed * 23.7));
+        float edgeDistance = min(min(paneUv.x, 1.0 - paneUv.x), min(paneUv.y, 1.0 - paneUv.y));
+        float edgeBlurBoost = 1.0 + (1.0 - smoothstep(0.05, 0.22, edgeDistance)) * 1.05;
+        float coc = clamp(abs(center.depth - focalDepth) * aperture * (0.4 + center.depth) * edgeBlurBoost, 0.0, 13.5);
+
+        vec3 accum = vec3(0.0);
+        float wsum = 0.0;
+        vec2 pixel = 1.0 / u_resolution.xy;
+        float paneBlurScale = mix(1.0, 1.4, fract(paneSeed * 29.1));
+
+        for (int i = 0; i < SAMPLES; i++) {
+          float fi = float(i) + 0.5;
+          float rr = sqrt(fi / float(SAMPLES));
+          float aa = fi * GOLDEN_ANGLE;
+
+          vec2 disk = rr * vec2(cos(aa), sin(aa));
+          vec2 offsetUv = disk * coc * pixel * paneBlurScale;
+          vec2 sampleUv = clamp(paneUv + offsetUv, 0.0, 1.0);
+          SceneData s = paneSceneAt(sampleUv, paneSeed);
+
+          float depthGate = smoothstep(-0.10, 0.18, s.depth - center.depth);
+          float w = mix(0.42, 1.0, depthGate);
+
+          accum += s.color * w;
+          wsum += w;
+        }
+
+        vec3 col = accum / max(wsum, 1e-4);
+
+        vec3 fogColor = vec3(0.80, 0.79, 0.77);
+        float edgeFog = (1.0 - smoothstep(0.02, 0.16, edgeDistance)) * 0.45;
+        float paneFogNoise = blotchField(paneUv * vec2(2.8, 2.1) + paneId * 0.63 + vec2(paneSeed * 5.0));
+        float fog = smoothstep(0.35, 1.0, center.depth) * (0.21 + (paneFogNoise - 0.5) * 0.05) + edgeFog;
+        col = mix(col, fogColor, fog);
+
+        vec2 paneCentered = paneUv * 2.0 - 1.0;
+        paneCentered += vec2(
+          (hash21(paneId + 9.4) - 0.5) * 0.08,
+          (hash21(paneId + 3.2) - 0.5) * 0.08
+        );
+        float vignette = 1.0 - dot(paneCentered * vec2(0.97, 1.03), paneCentered) * 0.22;
+        col *= clamp(vignette, 0.0, 1.0);
+        float paneTexture = valueNoise(paneUv * vec2(6.5, 5.2) + paneId * 1.73 + vec2(paneSeed * 21.0));
+        col *= 0.99 + (paneTexture - 0.5) * 0.045;
+
+        // Small per-pane luminance variance makes panes feel less synchronized.
+        col *= mix(0.96, 1.03, hash21(paneId + 7.1));
+
+        return pow(col, vec3(0.95));
+      }
+
+      float paneMask(vec2 uv01, vec2 gridCount, vec2 frameWidth) {
+        vec2 cell = fract(uv01 * gridCount);
+        float aa = 1.5 / min(u_resolution.x, u_resolution.y);
+        float dx = min(cell.x, 1.0 - cell.x);
+        float dy = min(cell.y, 1.0 - cell.y);
+        float px = smoothstep(frameWidth.x, frameWidth.x + aa, dx);
+        float py = smoothstep(frameWidth.y, frameWidth.y + aa, dy);
+        return px * py;
+      }
+
+      // Frame bars as a mask (1 on bars, 0 in panes) with configurable softness.
+      float frameBarsMask(vec2 uv01, vec2 gridCount, vec2 frameWidth, float softness) {
+        vec2 cell = fract(uv01 * gridCount);
+        float dx = min(cell.x, 1.0 - cell.x);
+        float dy = min(cell.y, 1.0 - cell.y);
+        // Use low-frequency noise/warp so bar edges feel less generated.
+        float edgeNoise = valueNoise(uv01 * u_resolution.xy * 0.015 + vec2(23.17, 11.73));
+        float broadWarp = valueNoise(uv01 * gridCount * 0.85 + vec2(5.2, 9.7)) * 2.0 - 1.0;
+        float nearestBarDist = min(abs(dx - frameWidth.x), abs(dy - frameWidth.y));
+        float blurEdgeZone = 1.0 - smoothstep(0.0, softness * 2.45, nearestBarDist);
+        float jitter = (edgeNoise - 0.5) * 0.0055 * mix(1.0, 0.45, blurEdgeZone) + broadWarp * 0.0018;
+        float spatialSoft = valueNoise((uv01 + vec2(0.17, 0.29)) * gridCount * 0.55 + vec2(2.1, 4.7));
+        float dissolveBias = valueNoise((uv01 + vec2(0.61, 0.13)) * gridCount * 0.32 + vec2(6.2, 1.8));
+        float localSoft = softness * (0.93 + 0.27 * edgeNoise + 0.22 * abs(broadWarp) + 0.14 * (spatialSoft - 0.5) + 0.07 * (dissolveBias - 0.5));
+
+        float coreX = 1.0 - smoothstep(frameWidth.x + jitter, frameWidth.x + localSoft + jitter, dx);
+        float coreY = 1.0 - smoothstep(frameWidth.y + jitter, frameWidth.y + localSoft + jitter, dy);
+        float bloomX = 1.0 - smoothstep(frameWidth.x + localSoft * 0.33 + jitter, frameWidth.x + localSoft * 2.32 + jitter, dx);
+        float bloomY = 1.0 - smoothstep(frameWidth.y + localSoft * 0.33 + jitter, frameWidth.y + localSoft * 2.32 + jitter, dy);
+        float bars = max(coreX, coreY);
+        float bloom = max(bloomX, bloomY);
+
+        // Round/fill shadow vertices slightly to reduce optical diagonal artifacts.
+        float d00 = length(cell - vec2(0.0, 0.0));
+        float d10 = length(cell - vec2(1.0, 0.0));
+        float d01 = length(cell - vec2(0.0, 1.0));
+        float d11 = length(cell - vec2(1.0, 1.0));
+        float cornerDist = min(min(d00, d10), min(d01, d11));
+        float cornerRadius = max(frameWidth.x, frameWidth.y) * 1.10;
+        // Subtle per-intersection noise for less uniform inner-corner curvature.
+        float cornerNoise = valueNoise((uv01 + vec2(0.41, 0.87)) * gridCount * 1.25 + vec2(8.3, 5.6));
+        float cornerNoise2 = valueNoise((uv01 + vec2(0.12, 0.33)) * gridCount * 2.10 + vec2(3.7, 9.2));
+        float cornerRadiusN = cornerRadius * (1.0 + (cornerNoise - 0.5) * 0.16);
+        float cornerSoftN = localSoft * (1.55 + (cornerNoise2 - 0.5) * 0.26);
+        float cornerRound = 1.0 - smoothstep(cornerRadiusN, cornerRadiusN + cornerSoftN, cornerDist);
+
+        return clamp(bars * 0.80 + bloom * 0.28 + cornerRound * 2.20, 0.0, 1.0);
+      }
+
+      // Returns x = left shadow edge, y = top shadow edge.
+      vec2 shadowEdges(vec2 gridCount, vec2 frameWidth, vec2 shadowOffset) {
+        float shadowSoft = 0.040;
+        float shadowHalfX = (frameWidth.x + shadowSoft * 1.10) / gridCount.x;
+        float shadowHalfY = (frameWidth.y + shadowSoft * 1.10) / gridCount.y;
+        float leftShadowEdge = -shadowOffset.x - shadowHalfX;
+        float topShadowEdge = (1.0 - shadowOffset.y) + shadowHalfY;
+        return vec2(leftShadowEdge, topShadowEdge);
+      }
+
+      // Shadow plane (interior grid + top/left fill + seam healing) at any UV.
+      float shadowAt(vec2 uv01, vec2 fragCoord, vec2 gridCount, vec2 frameWidth, vec2 shadowOffset, vec2 edges) {
+        float shadowSoft = 0.040;
+        float leftShadowEdge = edges.x;
+        float topShadowEdge = edges.y;
+
+        float shadowBars = frameBarsMask(uv01 + shadowOffset, gridCount, frameWidth, shadowSoft);
+
+        // Interior repeated pattern with hard clipping to avoid pre-fill fading.
+        float domainX = step(leftShadowEdge, uv01.x);
+        float domainY = 1.0 - step(topShadowEdge, uv01.y);
+        float interior = shadowBars * domainX * domainY;
+
+        // Fully fill top/left extension regions with shadow coverage.
+        float insetX = (frameWidth.x / gridCount.x) * 1.70;
+        float insetY = (frameWidth.y / gridCount.y) * 2.20;
+        float inTopExtension = step(topShadowEdge - insetY, uv01.y);
+        float inLeftExtension = 1.0 - step(leftShadowEdge + insetX, uv01.x);
+        float extensions = max(inTopExtension, inLeftExtension);
+
+        float shadowLayer = max(interior, extensions);
+        float blurZone = 1.0 - smoothstep(0.72, 0.98, shadowBars);
+        float atmospheric = valueNoise((uv01 + shadowOffset * 0.5) * vec2(4.2, 3.0) + vec2(1.2, 8.4));
+        float atmosphericSlow = valueNoise((uv01 + shadowOffset * 0.25) * vec2(1.45, 1.10) + vec2(17.3, 2.4));
+        float atmosphericVerySlow = valueNoise((uv01 + shadowOffset * 0.12) * vec2(0.62, 0.48) + vec2(3.7, 14.9));
+        float layerNoise = mix(
+          1.0,
+          0.988 + 0.010 * valueNoise(fragCoord * 0.05 + vec2(11.0, 73.0)),
+          1.0 - blurZone * 0.85
+        );
+        float density = 0.945 + (atmospheric - 0.5) * 0.095 + (atmosphericSlow - 0.5) * 0.045 + (atmosphericVerySlow - 0.5) * 0.035;
+        return clamp(shadowLayer * layerNoise * density, 0.0, 1.0);
+      }
+
+      void main() {
+        vec2 fragCoord = gl_FragCoord.xy;
+        vec2 rawUv01 = fragCoord / u_resolution.xy;
+        vec2 frameMin = u_frameRect.xy;
+        vec2 frameMax = u_frameRect.zw;
+        vec2 frameSize = frameMax - frameMin;
+        if (
+          rawUv01.x < frameMin.x || rawUv01.x > frameMax.x ||
+          rawUv01.y < frameMin.y || rawUv01.y > frameMax.y
+        ) {
+          gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+          return;
+        }
+        vec2 gridCount = vec2(4.0, 3.0);
+        float frameBase = 0.09;
+        vec2 uvFrame = (rawUv01 - frameMin) / frameSize;
+        vec2 uv01 = uvFrame;
+        vec2 compRes = u_resolution.xy * frameSize;
+        vec2 compFragCoord = uvFrame * compRes;
+
+        vec3 frameColor = vec3(0.905, 0.882, 0.825);
+        vec3 frameHighlight = vec3(0.957, 0.944, 0.900);
+
+        // Compensate for composition aspect; horizontal bars stay half vertical.
+        float yAspectComp = (gridCount.y * compRes.x) / (gridCount.x * compRes.y);
+        vec2 frameWidth = vec2(frameBase, frameBase * yAspectComp * 0.5);
+        // Add one extra horizontal frame bar at top and bottom.
+        float extraBandY = frameWidth.y / gridCount.y;
+        float coreMinY = extraBandY;
+        float coreMaxY = 1.0 - extraBandY;
+        if (uvFrame.y < coreMinY || uvFrame.y > coreMaxY) {
+          float staticVariationBand = 0.5 + 0.5 * sin((uvFrame.x + uvFrame.y) * 9.0);
+          vec3 bandCol = mix(frameColor, frameHighlight, staticVariationBand * 0.10);
+          bandCol *= 0.96;
+          bandCol += 0.005;
+
+          // Match upper-layer frame texturing so added bars read consistently.
+          float tonalBand = dot(bandCol, vec3(0.299, 0.587, 0.114));
+          float lightTexBand = smoothstep(0.40, 0.85, tonalBand);
+          float shadowTexBand = 1.0 - lightTexBand;
+          float weaveBand = canvasWeave(compFragCoord);
+          float toothBand = valueNoise(compFragCoord * 0.035 + vec2(7.2, 2.6));
+          float bandSeed = hash21(floor(uvFrame * vec2(53.0, 29.0)) + vec2(1.7, 4.2));
+          float residualBand = filmGrain(compFragCoord * 0.22 + bandSeed * 37.0);
+          float weaveAmtBand = 0.0040 + lightTexBand * 0.0058 + shadowTexBand * 0.0008;
+          float toothAmtBand = 0.0032 + lightTexBand * 0.0052 + shadowTexBand * 0.0007;
+          float grainAmtBand = 0.0016 + lightTexBand * 0.0012 + shadowTexBand * 0.0008;
+          bandCol += (weaveBand - 0.5) * weaveAmtBand;
+          bandCol += (toothBand - 0.5) * toothAmtBand;
+          bandCol += (residualBand - 0.5) * grainAmtBand;
+          bandCol = clamp(bandCol, 0.0, 1.0);
+          gl_FragColor = vec4(bandCol, 1.0);
+          return;
+        }
+        float coreScaleY = coreMaxY - coreMinY;
+        uv01.y = (uvFrame.y - coreMinY) / coreScaleY;
+        compRes = vec2(compRes.x, compRes.y * coreScaleY);
+        compFragCoord = uv01 * compRes;
+        float panes = paneMask(uv01, gridCount, frameWidth);
+        // Enforce equal-thickness outer border on all four sides.
+        float aa = 1.5 / min(u_resolution.x, u_resolution.y);
+        // Interior bars are shared by adjacent cells, so their total width is 2x
+        // the per-cell frameWidth term; match that on composition edges as well.
+        float outerX = frameBase / gridCount.x;
+        // Keep top/bottom row panes consistent with middle-row pane proportions.
+        float outerY = frameWidth.y / gridCount.y;
+        float insideOuter =
+          smoothstep(outerX, outerX + aa, uv01.x) *
+          smoothstep(outerX, outerX + aa, 1.0 - uv01.x) *
+          smoothstep(outerY, outerY + aa, uv01.y) *
+          smoothstep(outerY, outerY + aa, 1.0 - uv01.y);
+        panes = min(panes, insideOuter);
+        float frame = 1.0 - panes;
+
+        vec2 cell = uv01 * gridCount;
+        vec2 paneId = floor(cell);
+        vec2 paneUv = fract(cell);
+        float paneSeed = hash21(paneId + 0.123);
+        vec3 bg = paneDofColor(paneUv, paneId, paneSeed);
+
+        float staticVariation = 0.5 + 0.5 * sin((uv01.x + uv01.y) * 9.0);
+        vec3 mullion = mix(frameColor, frameHighlight, staticVariation * 0.10);
+
+        // Light, flat pane tint to keep painterly feel.
+        float glassSheen = pow(max(0.0, 1.0 - length((uv01 - 0.5) * vec2(compRes.x / compRes.y, 1.0))), 2.0);
+        vec3 glassTint = vec3(0.004, 0.006, 0.007) + glassSheen * vec3(0.004, 0.004, 0.0035);
+
+        // One consistent shadow layer under the whole frame grid.
+        vec2 shadowOffset = vec2(-0.0750, 0.1);
+        vec3 shadowTint = vec3(0.071, 0.092, 0.089);
+        vec2 edges = shadowEdges(gridCount, frameWidth, shadowOffset);
+        float shadowLayer = shadowAt(uv01, compFragCoord, gridCount, frameWidth, shadowOffset, edges);
+
+        vec3 paneColor = bg + glassTint;
+        float shadowMix = clamp(shadowLayer * 1.14, 0.0, 1.0) * panes;
+        paneColor = mix(paneColor, shadowTint, clamp(shadowMix, 0.0, 1.0));
+        // Push non-shadowed regions toward a soft neutral gray reference.
+        float negativeSpaceMask = panes * (1.0 - clamp(shadowMix, 0.0, 1.0));
+        vec3 negativeSpaceTone = vec3(0.736, 0.731, 0.722);
+        paneColor = mix(paneColor, negativeSpaceTone, negativeSpaceMask * 0.58);
+
+        // Extra near-frame falloff to help the "under-layer" read.
+        float edgeDistance = min(min(paneUv.x, 1.0 - paneUv.x), min(paneUv.y, 1.0 - paneUv.y));
+        float frameFalloff = 1.0 - smoothstep(0.01, 0.11, edgeDistance);
+        paneColor -= frameFalloff * 0.07;
+
+        // Subtle blotchy color grading on the bottom layer only.
+        float blotch = blotchField(uv01 * vec2(2.4, 1.9) + vec2(0.4, 1.2));
+        float blotchMask = smoothstep(0.28, 0.90, blotch);
+        float lightRegion = smoothstep(0.42, 0.82, dot(paneColor, vec3(0.3333)));
+        float shadowRegion = clamp(shadowMix, 0.0, 1.0);
+        vec3 coolGrade = vec3(0.985, 1.000, 1.018);
+        vec3 warmGrade = vec3(1.018, 1.000, 0.983);
+        vec3 blotchGrade = mix(coolGrade, warmGrade, blotch);
+        float blotchStrength = (0.02 + 0.09 * blotchMask) * lightRegion * (1.0 - 0.55 * shadowRegion);
+        paneColor *= mix(vec3(1.0), blotchGrade, blotchStrength);
+        paneColor *= 0.992 + (blotchMask - 0.5) * 0.045 * lightRegion;
+
+        // Top layer: consistent frame bars.
+        vec3 col = mix(mullion, paneColor, panes);
+
+        col *= mix(0.96, 1.0, panes);
+        col += frame * 0.005;
+
+        // Painting-like surface texture: subtle weave + tooth, not screen noise.
+        float tonal = dot(col, vec3(0.299, 0.587, 0.114));
+        float lightTex = smoothstep(0.40, 0.85, tonal);
+        float shadowTex = 1.0 - lightTex;
+        float weave = canvasWeave(compFragCoord);
+        float tooth = valueNoise(compFragCoord * 0.035 + vec2(7.2, 2.6));
+        float residualGrain = filmGrain(compFragCoord * 0.22 + paneSeed * 37.0);
+        float weaveAmt = 0.0040 + lightTex * 0.0058 + shadowTex * 0.0008;
+        float toothAmt = 0.0032 + lightTex * 0.0052 + shadowTex * 0.0007;
+        float grainAmt = 0.0016 + lightTex * 0.0012 + shadowTex * 0.0008;
+        col += (weave - 0.5) * weaveAmt;
+        col += (tooth - 0.5) * toothAmt;
+        col += (residualGrain - 0.5) * grainAmt;
+        col = clamp(col, 0.0, 1.0);
+
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `;
+
+    function compileShader(type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const msg = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        throw new Error("Shader compile error: " + msg);
+      }
+      return shader;
+    }
+
+    function createProgram(vsSource, fsSource) {
+      const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+      const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+      const program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        const msg = gl.getProgramInfoLog(program);
+        gl.deleteProgram(program);
+        throw new Error("Program link error: " + msg);
+      }
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      return program;
+    }
+
+    const program = createProgram(vertexSource, fragmentSource);
+    gl.useProgram(program);
+
+    const posBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([
+        -1, -1,
+         1, -1,
+        -1,  1,
+        -1,  1,
+         1, -1,
+         1,  1
+      ]),
+      gl.STATIC_DRAW
+    );
+
+    const aPosition = gl.getAttribLocation(program, "a_position");
+    gl.enableVertexAttribArray(aPosition);
+    gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
+
+    const uResolution = gl.getUniformLocation(program, "u_resolution");
+    const uTime = gl.getUniformLocation(program, "u_time");
+    const uFrameRect = gl.getUniformLocation(program, "u_frameRect");
+
+    const frameState = {
+      x: 0.06,
+      y: 0.06,
+      w: 0.88,
+      h: 0.88
+    };
+    const interaction = {
+      mode: "none", // "none" | "move" | "resize"
+      handle: null, // "nw" | "ne" | "sw" | "se" | "n" | "s" | "e" | "w"
+      pointerId: null,
+      moveOffsetX: 0,
+      moveOffsetY: 0
+    };
+    const MIN_FRAME_W = 0.20;
+    const MIN_FRAME_H = 0.20;
+    const CORNER_HIT_RADIUS_PX = 16;
+    const SIDE_HIT_DIST_PX = 12;
+    const CENTER_HIT_RADIUS_PX = 30;
+
+    function clamp(v, lo, hi) {
+      return Math.min(hi, Math.max(lo, v));
+    }
+
+    function eventToUv(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const x = (evt.clientX - rect.left) / rect.width;
+      // Use bottom-origin UV to match shader/frame coordinates.
+      const y = 1.0 - (evt.clientY - rect.top) / rect.height;
+      return { x: clamp(x, 0, 1), y: clamp(y, 0, 1), rect };
+    }
+
+    function frameCornersPx(rect) {
+      const x1 = frameState.x * rect.width;
+      const x2 = (frameState.x + frameState.w) * rect.width;
+      // Convert bottom-origin frame coords to top-origin screen coords.
+      const y1 = (1.0 - (frameState.y + frameState.h)) * rect.height;
+      const y2 = (1.0 - frameState.y) * rect.height;
+      return {
+        nw: { x: x1, y: y1 },
+        ne: { x: x2, y: y1 },
+        sw: { x: x1, y: y2 },
+        se: { x: x2, y: y2 },
+        n: { x: (x1 + x2) * 0.5, y: y1 },
+        s: { x: (x1 + x2) * 0.5, y: y2 },
+        w: { x: x1, y: (y1 + y2) * 0.5 },
+        e: { x: x2, y: (y1 + y2) * 0.5 },
+        cx: (x1 + x2) * 0.5,
+        cy: (y1 + y2) * 0.5
+      };
+    }
+
+    function hitHandle(evt) {
+      const { rect } = eventToUv(evt);
+      const corners = frameCornersPx(rect);
+      const px = evt.clientX - rect.left;
+      const py = evt.clientY - rect.top;
+      const x1 = corners.nw.x;
+      const y1 = corners.nw.y;
+      const x2 = corners.se.x;
+      const y2 = corners.se.y;
+      let bestCorner = null;
+      let bestCornerDist2 = Infinity;
+      for (const key of ["nw", "ne", "sw", "se"]) {
+        const dx = px - corners[key].x;
+        const dy = py - corners[key].y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestCornerDist2) {
+          bestCornerDist2 = d2;
+          bestCorner = key;
+        }
+      }
+      if (bestCornerDist2 <= CORNER_HIT_RADIUS_PX * CORNER_HIT_RADIUS_PX) {
+        return bestCorner;
+      }
+
+      // Make full edge length grabbable (not only side midpoints).
+      const edgeCandidates = [];
+      if (px >= x1 && px <= x2) {
+        edgeCandidates.push({ key: "n", dist: Math.abs(py - y1) });
+        edgeCandidates.push({ key: "s", dist: Math.abs(py - y2) });
+      }
+      if (py >= y1 && py <= y2) {
+        edgeCandidates.push({ key: "w", dist: Math.abs(px - x1) });
+        edgeCandidates.push({ key: "e", dist: Math.abs(px - x2) });
+      }
+      if (edgeCandidates.length === 0) return null;
+      edgeCandidates.sort((a, b) => a.dist - b.dist);
+      return edgeCandidates[0].dist <= SIDE_HIT_DIST_PX ? edgeCandidates[0].key : null;
+    }
+
+    function hitCenter(evt) {
+      const { rect } = eventToUv(evt);
+      const corners = frameCornersPx(rect);
+      const px = evt.clientX - rect.left;
+      const py = evt.clientY - rect.top;
+      const x1 = corners.nw.x;
+      const y1 = corners.nw.y;
+      const x2 = corners.se.x;
+      const y2 = corners.se.y;
+      const gutter = Math.max(CENTER_HIT_RADIUS_PX * 0.35, SIDE_HIT_DIST_PX + 2.0);
+      return px >= x1 + gutter && px <= x2 - gutter && py >= y1 + gutter && py <= y2 - gutter;
+    }
+
+    function updateCursor(evt) {
+      if (interaction.mode !== "none") return;
+      const handle = hitHandle(evt);
+      if (handle) {
+        if (handle === "nw" || handle === "se") canvas.style.cursor = "nwse-resize";
+        else if (handle === "ne" || handle === "sw") canvas.style.cursor = "nesw-resize";
+        else if (handle === "n" || handle === "s") canvas.style.cursor = "ns-resize";
+        else canvas.style.cursor = "ew-resize";
+        return;
+      }
+      if (hitCenter(evt)) {
+        canvas.style.cursor = "move";
+        return;
+      }
+      canvas.style.cursor = "default";
+    }
+
+    function resizeFromHandle(handle, uvX, uvY) {
+      const left = frameState.x;
+      const right = frameState.x + frameState.w;
+      const minY = frameState.y;
+      const maxY = frameState.y + frameState.h;
+
+      if (handle === "nw") {
+        const nx = clamp(uvX, 0, right - MIN_FRAME_W);
+        const nMaxY = clamp(uvY, minY + MIN_FRAME_H, 1);
+        frameState.x = nx;
+        frameState.w = right - nx;
+        frameState.h = nMaxY - minY;
+      } else if (handle === "ne") {
+        const nr = clamp(uvX, left + MIN_FRAME_W, 1);
+        const nMaxY = clamp(uvY, minY + MIN_FRAME_H, 1);
+        frameState.w = nr - left;
+        frameState.h = nMaxY - minY;
+      } else if (handle === "sw") {
+        const nx = clamp(uvX, 0, right - MIN_FRAME_W);
+        const nMinY = clamp(uvY, 0, maxY - MIN_FRAME_H);
+        frameState.x = nx;
+        frameState.y = nMinY;
+        frameState.w = right - nx;
+        frameState.h = maxY - nMinY;
+      } else if (handle === "se") {
+        const nr = clamp(uvX, left + MIN_FRAME_W, 1);
+        const nMinY = clamp(uvY, 0, maxY - MIN_FRAME_H);
+        frameState.y = nMinY;
+        frameState.w = nr - left;
+        frameState.h = maxY - nMinY;
+      } else if (handle === "n") {
+        const nMaxY = clamp(uvY, minY + MIN_FRAME_H, 1);
+        frameState.h = nMaxY - minY;
+      } else if (handle === "s") {
+        const nMinY = clamp(uvY, 0, maxY - MIN_FRAME_H);
+        frameState.y = nMinY;
+        frameState.h = maxY - nMinY;
+      } else if (handle === "w") {
+        const nx = clamp(uvX, 0, right - MIN_FRAME_W);
+        frameState.x = nx;
+        frameState.w = right - nx;
+      } else if (handle === "e") {
+        const nr = clamp(uvX, left + MIN_FRAME_W, 1);
+        frameState.w = nr - left;
+      }
+    }
+
+    canvas.addEventListener("pointerdown", (evt) => {
+      const handle = hitHandle(evt);
+      if (handle) {
+        interaction.mode = "resize";
+        interaction.handle = handle;
+        interaction.pointerId = evt.pointerId;
+        canvas.setPointerCapture(evt.pointerId);
+        return;
+      }
+      if (hitCenter(evt)) {
+        const uv = eventToUv(evt);
+        const cx = frameState.x + frameState.w * 0.5;
+        const cy = frameState.y + frameState.h * 0.5;
+        interaction.mode = "move";
+        interaction.handle = null;
+        interaction.pointerId = evt.pointerId;
+        interaction.moveOffsetX = uv.x - cx;
+        interaction.moveOffsetY = uv.y - cy;
+        canvas.setPointerCapture(evt.pointerId);
+      }
+    });
+
+    canvas.addEventListener("pointermove", (evt) => {
+      if (interaction.mode !== "none" && interaction.pointerId !== evt.pointerId) return;
+      if (interaction.mode === "none") {
+        updateCursor(evt);
+        return;
+      }
+      const uv = eventToUv(evt);
+      if (interaction.mode === "move") {
+        const halfW = frameState.w * 0.5;
+        const halfH = frameState.h * 0.5;
+        const cx = clamp(uv.x - interaction.moveOffsetX, halfW, 1 - halfW);
+        const cy = clamp(uv.y - interaction.moveOffsetY, halfH, 1 - halfH);
+        frameState.x = cx - halfW;
+        frameState.y = cy - halfH;
+      } else if (interaction.mode === "resize" && interaction.handle) {
+        resizeFromHandle(interaction.handle, uv.x, uv.y);
+      }
+    });
+
+    function endInteraction(evt) {
+      if (interaction.mode !== "none" && interaction.pointerId !== evt.pointerId) return;
+      interaction.mode = "none";
+      interaction.handle = null;
+      interaction.pointerId = null;
+      if (canvas.hasPointerCapture?.(evt.pointerId)) {
+        canvas.releasePointerCapture(evt.pointerId);
+      }
+      updateCursor(evt);
+    }
+    canvas.addEventListener("pointerup", endInteraction);
+    canvas.addEventListener("pointercancel", endInteraction);
+    canvas.addEventListener("pointerleave", (evt) => {
+      if (interaction.mode === "none") updateCursor(evt);
+    });
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.floor(canvas.clientWidth * dpr);
+      const height = Math.floor(canvas.clientHeight * dpr);
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    }
+
+    function render(timeMs) {
+      resize();
+      gl.useProgram(program);
+      gl.uniform2f(uResolution, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      gl.uniform1f(uTime, timeMs * 0.001);
+      gl.uniform4f(
+        uFrameRect,
+        frameState.x,
+        frameState.y,
+        frameState.x + frameState.w,
+        frameState.y + frameState.h
+      );
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
