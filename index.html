@@ -9,7 +9,7 @@
       margin: 0;
       width: 100%;
       height: 100%;
-      background: #000;
+      background: #020208;
       overflow: hidden;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     }
@@ -90,6 +90,7 @@
       uniform float u_time;
       uniform vec4 u_frameRect; // xMin, yMin, xMax, yMax in normalized canvas space
       uniform vec2 u_gridCount; // x = columns, y = rows
+      uniform vec2 u_seed; // random offset applied to all noise lookups
 
       #define SAMPLES 20
       #define GOLDEN_ANGLE 2.39996323
@@ -100,6 +101,7 @@
       };
 
       float hash21(vec2 p) {
+        p += u_seed;
         p = fract(p * vec2(123.34, 345.45));
         p += dot(p, p + 34.345);
         return fract(p.x * p.y);
@@ -110,10 +112,12 @@
       }
 
       float filmGrain(vec2 p) {
+        p += u_seed;
         return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
       }
 
       float valueNoise(vec2 p) {
+        p += u_seed;
         vec2 i = floor(p);
         vec2 f = fract(p);
         vec2 u = f * f * (3.0 - 2.0 * f);
@@ -162,7 +166,7 @@
 
         float depth = clamp(0.32 + tone * 0.38 + (0.5 - paneUv.y) * 0.12, 0.0, 1.0);
 
-        vec3 lightTone = mix(vec3(0.736, 0.734, 0.729), vec3(0.700, 0.704, 0.699), hash21(vec2(paneSeed, 8.8)));
+        vec3 lightTone = mix(vec3(0.694, 0.698, 0.714), vec3(0.660, 0.668, 0.684), hash21(vec2(paneSeed, 8.8)));
         vec3 darkTone = mix(vec3(0.575, 0.598, 0.598), vec3(0.540, 0.568, 0.568), hash21(vec2(paneSeed, 9.6)));
         float toneFlat = tone * 0.93 + 0.03;
         vec3 col = mix(lightTone, darkTone, toneFlat);
@@ -174,7 +178,7 @@
         col += paneDrift * 0.60;
 
         // Slight depth haze for painterly atmosphere.
-        vec3 haze = vec3(0.79, 0.785, 0.77);
+        vec3 haze = vec3(0.694, 0.698, 0.714);
         col = mix(col, haze, depth * 0.16);
 
         SceneData s;
@@ -249,42 +253,48 @@
       }
 
       // Frame bars as a mask (1 on bars, 0 in panes) with configurable softness.
-      float frameBarsMask(vec2 uv01, vec2 gridCount, vec2 frameWidth, float softness) {
+      // roundCorners: true for visible frame, false for shadow (avoids corner dip).
+      float frameBarsMask(vec2 uv01, vec2 gridCount, vec2 frameWidth, float softness, bool roundCorners) {
         vec2 cell = fract(uv01 * gridCount);
         float dx = min(cell.x, 1.0 - cell.x);
         float dy = min(cell.y, 1.0 - cell.y);
-        // Use low-frequency noise/warp so bar edges feel less generated.
+
+        // Subtle edge variance — gentle, not overly wobbly.
         float edgeNoise = valueNoise(uv01 * u_resolution.xy * 0.015 + vec2(23.17, 11.73));
         float broadWarp = valueNoise(uv01 * gridCount * 0.85 + vec2(5.2, 9.7)) * 2.0 - 1.0;
-        float nearestBarDist = min(abs(dx - frameWidth.x), abs(dy - frameWidth.y));
-        float blurEdgeZone = 1.0 - smoothstep(0.0, softness * 2.45, nearestBarDist);
-        float jitter = (edgeNoise - 0.5) * 0.0055 * mix(1.0, 0.45, blurEdgeZone) + broadWarp * 0.0018;
-        float spatialSoft = valueNoise((uv01 + vec2(0.17, 0.29)) * gridCount * 0.55 + vec2(2.1, 4.7));
-        float dissolveBias = valueNoise((uv01 + vec2(0.61, 0.13)) * gridCount * 0.32 + vec2(6.2, 1.8));
-        float localSoft = softness * (0.93 + 0.27 * edgeNoise + 0.22 * abs(broadWarp) + 0.14 * (spatialSoft - 0.5) + 0.07 * (dissolveBias - 0.5));
+        // Sparse "lips" — sharper localized pushes/pulls of the edge.
+        float lipNoise = valueNoise(uv01 * gridCount * 6.0 + vec2(13.4, 22.8));
+        float lipSparse = valueNoise(uv01 * gridCount * 2.2 + vec2(31.7, 8.3));
+        float lipMask = smoothstep(0.55, 0.85, lipSparse);
+        float lip = (lipNoise - 0.5) * lipMask;
+        float jitter = (edgeNoise - 0.5) * 0.0028 + broadWarp * 0.0010 + lip * 0.012;
+        float localSoft = softness * (0.96 + 0.12 * edgeNoise + 0.08 * abs(broadWarp) - lipMask * 0.25);
 
-        float coreX = 1.0 - smoothstep(frameWidth.x + jitter, frameWidth.x + localSoft + jitter, dx);
-        float coreY = 1.0 - smoothstep(frameWidth.y + jitter, frameWidth.y + localSoft + jitter, dy);
-        float bloomX = 1.0 - smoothstep(frameWidth.x + localSoft * 0.33 + jitter, frameWidth.x + localSoft * 2.32 + jitter, dx);
-        float bloomY = 1.0 - smoothstep(frameWidth.y + localSoft * 0.33 + jitter, frameWidth.y + localSoft * 2.32 + jitter, dy);
-        float bars = max(coreX, coreY);
-        float bloom = max(bloomX, bloomY);
+        float ex = dx - frameWidth.x - jitter;
+        float ey = dy - frameWidth.y - jitter;
+        float d;
+        if (roundCorners) {
+          // Rounded-box SDF for the pane opening.
+          float cornerR = min(frameWidth.x, frameWidth.y) * 0.35;
+          vec2 q = max(vec2(cornerR - ex, cornerR - ey), 0.0);
+          d = length(q) - cornerR + min(max(cornerR - ex, cornerR - ey), 0.0);
+        } else {
+          // Sharp max — no corner dip, full coverage at intersections.
+          d = -min(ex, ey);
+        }
 
-        // Round/fill shadow vertices slightly to reduce optical diagonal artifacts.
-        float d00 = length(cell - vec2(0.0, 0.0));
-        float d10 = length(cell - vec2(1.0, 0.0));
-        float d01 = length(cell - vec2(0.0, 1.0));
-        float d11 = length(cell - vec2(1.0, 1.0));
-        float cornerDist = min(min(d00, d10), min(d01, d11));
-        float cornerRadius = max(frameWidth.x, frameWidth.y) * 1.10;
-        // Subtle per-intersection noise for less uniform inner-corner curvature.
-        float cornerNoise = valueNoise((uv01 + vec2(0.41, 0.87)) * gridCount * 1.25 + vec2(8.3, 5.6));
-        float cornerNoise2 = valueNoise((uv01 + vec2(0.12, 0.33)) * gridCount * 2.10 + vec2(3.7, 9.2));
-        float cornerRadiusN = cornerRadius * (1.0 + (cornerNoise - 0.5) * 0.16);
-        float cornerSoftN = localSoft * (1.55 + (cornerNoise2 - 0.5) * 0.26);
-        float cornerRound = 1.0 - smoothstep(cornerRadiusN, cornerRadiusN + cornerSoftN, cornerDist);
+        // Asymmetric exponential with localized rate variance.
+        float nd = d / localSoft;
+        float rateNoise = valueNoise(uv01 * gridCount * 3.5 + vec2(7.3, 4.1));
+        float rateVariance = 0.7 + rateNoise * .26;
+        float falloff;
+        if (nd > 0.0) {
+          falloff = 1.0 - 0.5 * exp(-nd * 8.5 * rateVariance);
+        } else {
+          falloff = 0.5 * exp(nd * 8.5 * rateVariance);
+        }
 
-        return clamp(bars * 0.80 + bloom * 0.28 + cornerRound * 2.20, 0.0, 1.0);
+        return clamp(falloff, 0.0, 1.0);
       }
 
       // Returns x = left shadow edge, y = top shadow edge.
@@ -299,11 +309,20 @@
 
       // Shadow plane (interior grid + top/left fill + seam healing) at any UV.
       float shadowAt(vec2 uv01, vec2 fragCoord, vec2 gridCount, vec2 frameWidth, vec2 shadowOffset, vec2 edges) {
-        float shadowSoft = 0.040;
+        float shadowSoft = 0.14;
         float leftShadowEdge = edges.x;
         float topShadowEdge = edges.y;
 
-        float shadowBars = frameBarsMask(uv01 + shadowOffset, gridCount, frameWidth, shadowSoft);
+        float shadowBars = frameBarsMask(uv01 + shadowOffset, gridCount, frameWidth, shadowSoft, true);
+
+        // Compensate for corner dip: where both bar edges are close, boost shadow.
+        vec2 shadowCell = fract((uv01 + shadowOffset) * gridCount);
+        float sdx = min(shadowCell.x, 1.0 - shadowCell.x);
+        float sdy = min(shadowCell.y, 1.0 - shadowCell.y);
+        float barProxX = 1.0 - smoothstep(0.0, frameWidth.x + shadowSoft * 2.0, sdx);
+        float barProxY = 1.0 - smoothstep(0.0, frameWidth.y + shadowSoft * 2.0, sdy);
+        float cornerBoost = barProxX * barProxY;
+        shadowBars = max(shadowBars, shadowBars + cornerBoost * (1.0 - shadowBars) * 0.5);
 
         // Interior repeated pattern with hard clipping to avoid pre-fill fading.
         float domainX = step(leftShadowEdge, uv01.x);
@@ -312,7 +331,7 @@
 
         // Fully fill top/left extension regions with shadow coverage.
         float insetX = (frameWidth.x / gridCount.x) * 1.70;
-        float insetY = (frameWidth.y / gridCount.y) * 2.20;
+        float insetY = (frameWidth.y / gridCount.y) * 1.50;
         float inTopExtension = step(topShadowEdge - insetY, uv01.y);
         float inLeftExtension = 1.0 - step(leftShadowEdge + insetX, uv01.x);
         float extensions = max(inTopExtension, inLeftExtension);
@@ -345,7 +364,7 @@
           return;
         }
         vec2 gridCount = u_gridCount;
-        float frameBase = 0.09;
+        float frameBase = 0.108;
         vec2 uvFrame = (rawUv01 - frameMin) / frameSize;
         vec2 uv01 = uvFrame;
         vec2 compRes = u_resolution.xy * frameSize;
@@ -420,16 +439,100 @@
 
         // One consistent shadow layer under the whole frame grid.
         vec2 shadowOffset = vec2(-0.0750, 0.1);
-        vec3 shadowTint = vec3(0.071, 0.092, 0.089);
+        vec3 shadowDark = vec3(0.085, 0.140, 0.144);
+        vec3 shadowDarkExtreme = vec3(0.020, 0.060, 0.064);
+        vec3 shadowLight = vec3(0.119, 0.195, 0.195);
+        // Splotch noise aligned with the shadow structure (offset UV follows bars).
+        vec2 shadowStructUv = (uv01 + shadowOffset) * gridCount;
+        float shadowSplotch = blotchField(shadowStructUv * vec2(0.6, 0.5) + vec2(paneSeed * 7.0));
+        float shadowMid = valueNoise(shadowStructUv * vec2(1.1, 0.9) + vec2(paneSeed * 19.0));
+        shadowSplotch = shadowSplotch * 0.6 + shadowMid * 0.4;
+        shadowSplotch = smoothstep(0.44, 0.56, shadowSplotch);
+        // Haze: soften the shadow tint toward a misty midtone.
+        vec3 shadowHaze = vec3(0.155, 0.195, 0.200);
+        float hazeAmount = blotchField(shadowStructUv * vec2(0.35, 0.3) + vec2(paneSeed * 3.0));
+        vec3 shadowTint = mix(mix(shadowDark, shadowLight, shadowSplotch), shadowHaze, hazeAmount * 0.4);
+
+        // Rare dark strips: oriented along the bar they sit on, faded within splotches.
+        // Detect bar orientation: vertical bar = strips run vertically, horizontal bar = strips run horizontally.
+        vec2 stripCell = fract((uv01 + shadowOffset) * gridCount);
+        float stripDx = min(stripCell.x, 1.0 - stripCell.x);
+        float stripDy = min(stripCell.y, 1.0 - stripCell.y);
+        float onVerticalBar = step(stripDx, frameWidth.x);
+        float onHorizontalBar = step(stripDy, frameWidth.y);
+        // Vertical bar: high freq in x (thin strips), low freq in y (long).
+        float stripVert = valueNoise(uv01 * vec2(38.0, 3.0) + vec2(7.1, 3.4));
+        float stripHoriz = valueNoise(uv01 * vec2(3.0, 38.0) + vec2(7.1, 3.4));
+        float stripNoise = mix(stripHoriz, stripVert, onVerticalBar * (1.0 - onHorizontalBar * 0.5));
+        // Sparse presence: only a couple of strips across the work.
+        float stripPresence = valueNoise(uv01 * vec2(1.8, 2.2) + vec2(19.3, 11.7));
+        float darkStrip = smoothstep(0.82, 0.95, stripNoise) * smoothstep(0.78, 0.92, stripPresence);
+        // Fade strip in/out within the dark splotch it sits on (smooth envelope).
+        float splotchEnvelope = 1.0 - smoothstep(0.0, 0.5, shadowSplotch);
+        splotchEnvelope = splotchEnvelope * splotchEnvelope;
+        shadowTint = mix(shadowTint, shadowDarkExtreme, darkStrip * splotchEnvelope * 0.6);
+        // Grain on the shadow layer.
+        float shadowGrain = filmGrain(compFragCoord * 0.55 + paneSeed * 51.0);
+        shadowTint += (shadowGrain - 0.5) * 0.035;
+
+        // Brush drag: wispy displacement of the shadow boundary.
+        float brushAngle = hash21(paneId + 4.7) * 3.14159;
+        vec2 brushDir = vec2(cos(brushAngle), sin(brushAngle));
+        vec2 brushPerp = vec2(-brushDir.y, brushDir.x);
+        float along = dot(paneUv - 0.5, brushDir);
+        float across = dot(paneUv - 0.5, brushPerp);
+        // 24 wisp octaves at varied scales.
+        float w1  = valueNoise(vec2(along * 50.0, across * 0.25) + paneId * 1.7);
+        float w2  = valueNoise(vec2(along * 44.0, across * 0.22) + paneId * 2.3);
+        float w3  = valueNoise(vec2(along * 38.0, across * 0.19) + paneId * 4.1);
+        float w4  = valueNoise(vec2(along * 33.0, across * 0.16) + paneId * 5.1);
+        float w5  = valueNoise(vec2(along * 28.0, across * 0.13) + paneId * 3.1);
+        float w6  = valueNoise(vec2(along * 24.0, across * 0.11) + paneId * 6.8);
+        float w7  = valueNoise(vec2(along * 20.0, across * 0.09) + paneId * 7.4);
+        float w8  = valueNoise(vec2(along * 17.0, across * 0.07) + paneId * 9.2);
+        float w9  = valueNoise(vec2(along * 14.0, across * 0.06) + paneId * 11.2);
+        float w10 = valueNoise(vec2(along * 11.5, across * 0.05) + paneId * 13.5);
+        float w11 = valueNoise(vec2(along * 9.5, across * 0.04) + paneId * 15.6);
+        float w12 = valueNoise(vec2(along * 7.5, across * 0.035) + paneId * 17.9);
+        float w13 = valueNoise(vec2(along * 6.0, across * 0.03) + paneId * 19.3);
+        float w14 = valueNoise(vec2(along * 4.8, across * 0.025) + paneId * 21.1);
+        float w15 = valueNoise(vec2(along * 3.8, across * 0.02) + paneId * 23.7);
+        float w16 = valueNoise(vec2(along * 3.0, across * 0.017) + paneId * 25.4);
+        float w17 = valueNoise(vec2(along * 2.3, across * 0.014) + paneId * 27.4);
+        float w18 = valueNoise(vec2(along * 1.8, across * 0.011) + paneId * 29.8);
+        float w19 = valueNoise(vec2(along * 1.3, across * 0.009) + paneId * 31.2);
+        float w20 = valueNoise(vec2(along * 1.0, across * 0.007) + paneId * 33.6);
+        float w21 = valueNoise(vec2(along * 46.0, across * 0.24) + paneId * 35.8);
+        float w22 = valueNoise(vec2(along * 36.0, across * 0.17) + paneId * 37.5);
+        float w23 = valueNoise(vec2(along * 22.0, across * 0.10) + paneId * 39.1);
+        float w24 = valueNoise(vec2(along * 15.0, across * 0.065) + paneId * 41.3);
+        float wisp = w1*0.03 + w2*0.03 + w3*0.035 + w4*0.04 + w5*0.04 + w6*0.045
+                   + w7*0.05 + w8*0.05 + w9*0.055 + w10*0.055 + w11*0.05 + w12*0.05
+                   + w13*0.045 + w14*0.045 + w15*0.04 + w16*0.04 + w17*0.035 + w18*0.035
+                   + w19*0.03 + w20*0.03 + w21*0.025 + w22*0.025 + w23*0.025 + w24*0.025;
+        // Patchy presence — some areas dragged, others barely.
+        float dragPresence = smoothstep(0.25, 0.75, blotchField(paneUv * vec2(1.0, 0.8) + paneId * 2.3));
+        // More wisps but gentler overall.
+        float dragRaw = (wisp - 0.5) * dragPresence * 0.02;
+        float dragAmount = sign(dragRaw) * pow(abs(dragRaw) / 0.04, 0.6) * 0.04;
+        vec2 draggedUv = uv01 + brushDir * dragAmount / gridCount;
+
         vec2 edges = shadowEdges(gridCount, frameWidth, shadowOffset);
-        float shadowLayer = shadowAt(uv01, compFragCoord, gridCount, frameWidth, shadowOffset, edges);
+        float shadowLayer = shadowAt(draggedUv, compFragCoord, gridCount, frameWidth, shadowOffset, edges);
 
         vec3 paneColor = bg + glassTint;
-        float shadowMix = clamp(shadowLayer * 1.14, 0.0, 1.0) * panes;
-        paneColor = mix(paneColor, shadowTint, clamp(shadowMix, 0.0, 1.0));
+        float shadowMix = clamp(shadowLayer * 1.04, 0.0, 1.0) * panes;
+        // Light curve warp — keep it subtle so wisps aren't smoothed out.
+        float curveWarp = blotchField(paneUv * vec2(2.0, 1.6) + paneId * 0.74 + vec2(paneSeed * 14.0));
+        float curveMicro = valueNoise(paneUv * vec2(5.0, 4.0) + paneId * 1.9 + vec2(paneSeed * 27.0));
+        float warpAmount = (curveWarp * 0.4 + curveMicro * 0.15 - 0.5) * 0.10;
+        // Pass shadowMix more directly — less S-curve normalization.
+        float shadowBlend = clamp(shadowMix + warpAmount, 0.0, 1.0);
+        paneColor = mix(paneColor, shadowTint, shadowBlend);
+
         // Push non-shadowed regions toward a soft neutral gray reference.
-        float negativeSpaceMask = panes * (1.0 - clamp(shadowMix, 0.0, 1.0));
-        vec3 negativeSpaceTone = vec3(0.736, 0.731, 0.722);
+        float negativeSpaceMask = panes * (1.0 - shadowMix);
+        vec3 negativeSpaceTone = vec3(0.694, 0.698, 0.714);
         paneColor = mix(paneColor, negativeSpaceTone, negativeSpaceMask * 0.58);
 
         // Extra near-frame falloff to help the "under-layer" read.
@@ -529,6 +632,8 @@
     const uTime = gl.getUniformLocation(program, "u_time");
     const uFrameRect = gl.getUniformLocation(program, "u_frameRect");
     const uGridCount = gl.getUniformLocation(program, "u_gridCount");
+    const uSeed = gl.getUniformLocation(program, "u_seed");
+    const seed = [Math.random() * 1000.0, Math.random() * 1000.0];
 
     const MIN_COLS = 1;
     const MAX_COLS = 10;
@@ -816,6 +921,7 @@
       gl.uniform2f(uResolution, gl.drawingBufferWidth, gl.drawingBufferHeight);
       gl.uniform1f(uTime, timeMs * 0.001);
       gl.uniform2f(uGridCount, gridState.cols, gridState.rows);
+      gl.uniform2f(uSeed, seed[0], seed[1]);
       gl.uniform4f(
         uFrameRect,
         frameState.x,
