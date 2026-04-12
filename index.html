@@ -331,13 +331,28 @@
 
         // Fully fill top/left extension regions with shadow coverage.
         float insetX = (frameWidth.x / gridCount.x) * 1.70;
-        float insetY = (frameWidth.y / gridCount.y) * 1.50;
-        float inTopExtension = step(topShadowEdge - insetY, uv01.y);
+        // Top shadow bar extends from the top of the frame down to the
+        // peak of the natural shadow cast by the topmost mullion. Its
+        // bottom edge uses the same exponential falloff as frameBarsMask
+        // so it merges into the natural shadow without a visible seam.
+        float topBarBottom = 1.0 - shadowOffset.y;
+        float topBarSoft = shadowSoft / gridCount.y;
+        float topBarNd = (uv01.y - topBarBottom) / topBarSoft;
+        float inTopExtension;
+        if (topBarNd >= 0.0) {
+          inTopExtension = 1.0;
+        } else {
+          inTopExtension = exp(topBarNd * 2.0);
+        }
         float inLeftExtension = 1.0 - step(leftShadowEdge + insetX, uv01.x);
-        float extensions = max(inTopExtension, inLeftExtension);
 
-        float shadowLayer = max(interior, extensions);
-        float blurZone = 1.0 - smoothstep(0.72, 0.98, shadowBars);
+        // Combine interior and extensions as overlapping translucent layers
+        // instead of taking the max. With max, the boundary at topBarBottom
+        // shows a hairline because the extension hard-jumps from 1.0 to its
+        // exponential value while the natural shadow only reaches ~0.96 at
+        // its peak. Opacity-style combination gives no jump at the seam.
+        float shadowLayer = 1.0 - (1.0 - interior) * (1.0 - inTopExtension) * (1.0 - inLeftExtension);
+        float blurZone = 1.0 - smoothstep(0.72, 0.98, shadowLayer);
         float atmospheric = valueNoise((uv01 + shadowOffset * 0.5) * vec2(4.2, 3.0) + vec2(1.2, 8.4));
         float atmosphericSlow = valueNoise((uv01 + shadowOffset * 0.25) * vec2(1.45, 1.10) + vec2(17.3, 2.4));
         float atmosphericVerySlow = valueNoise((uv01 + shadowOffset * 0.12) * vec2(0.62, 0.48) + vec2(3.7, 14.9));
@@ -521,7 +536,12 @@
         float shadowLayer = shadowAt(draggedUv, compFragCoord, gridCount, frameWidth, shadowOffset, edges);
 
         vec3 paneColor = bg + glassTint;
-        float shadowMix = clamp(shadowLayer * 1.04, 0.0, 1.0) * panes;
+        // Compute the under-layer shadow continuously, independent of the
+        // top-layer pane mask. Gating by panes made the AA transition at
+        // the topmost mullion show a sliver of partial-shadow under-layer
+        // that did not blend with the fully-shadowed area above it. The
+        // top-layer mullions are still drawn via the panes mix below.
+        float shadowMix = clamp(shadowLayer * 1.04, 0.0, 1.0);
         // Light curve warp — keep it subtle so wisps aren't smoothed out.
         float curveWarp = blotchField(paneUv * vec2(2.0, 1.6) + paneId * 0.74 + vec2(paneSeed * 14.0));
         float curveMicro = valueNoise(paneUv * vec2(5.0, 4.0) + paneId * 1.9 + vec2(paneSeed * 27.0));
